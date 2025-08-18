@@ -12,12 +12,10 @@ cleaner:
   # 白名单容器名称模式（正则表达式）
   whitelist_patterns:
     - "^kube-system-.*"
-    - "^monitoring-.*"
-    - "^logging-.*"
   # 是否启用干跑模式（只检测不清理）
   dry_run: false
-  # 容器运行时类型 ("docker", "containerd", "auto")
-  container_runtime: "auto"
+  # 容器运行时类型 ("docker", "containerd",默认为"docker")
+  container_runtime: "docker"
 
 metrics:
   enabled: true

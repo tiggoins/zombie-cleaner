@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -13,20 +15,28 @@ import (
 
 // ContainerdRuntime Containerd运行时实现
 type ContainerdRuntime struct {
-	client *containerd.Client
-	logger *logger.Logger
+	client   *containerd.Client
+	logger   *logger.Logger
+	timeout  time.Duration
+	detector interface {
+		RecordTimeoutContainer(containerID string)
+	}
 }
 
 // NewContainerdRuntime 创建Containerd运行时实例
-func NewContainerdRuntime(log *logger.Logger) (*ContainerdRuntime, error) {
+func NewContainerdRuntime(log *logger.Logger, timeout time.Duration, detector interface {
+	RecordTimeoutContainer(containerID string)
+}) (*ContainerdRuntime, error) {
 	cli, err := containerd.New("/run/containerd/containerd.sock")
 	if err != nil {
 		return nil, fmt.Errorf("无法连接containerd守护进程: %w", err)
 	}
 
 	return &ContainerdRuntime{
-		client: cli,
-		logger: log.WithComponent("containerd-runtime"),
+		client:   cli,
+		logger:   log.WithComponent("containerd-runtime"),
+		timeout:  timeout,
+		detector: detector,
 	}, nil
 }
 
@@ -43,12 +53,21 @@ func (c *ContainerdRuntime) ListContainers(ctx context.Context) ([]ContainerMeta
 	var result []ContainerMeta
 	for _, container := range containers {
 		// 为每个容器设置超时
-		inspectCtx, cancel := context.WithTimeout(nsCtx, 30*time.Second)
+		inspectCtx, cancel := context.WithTimeout(nsCtx, c.timeout)
 		info, err := container.Info(inspectCtx)
 		cancel()
 		
 		if err != nil {
-			c.logger.Warn("Containerd容器检查失败", "container_id", container.ID(), "error", err)
+			// 检查是否是超时错误
+			if errors.Is(err, context.DeadlineExceeded) {
+				c.logger.Warn("Containerd容器检查超时", "container_id", container.ID())
+				// 记录超时容器
+				if c.detector != nil {
+					c.detector.RecordTimeoutContainer(container.ID())
+				}
+			} else {
+				c.logger.Warn("Containerd容器检查失败", "container_id", container.ID(), "error", err)
+			}
 			continue
 		}
 
@@ -139,6 +158,46 @@ func (c *ContainerdRuntime) RemoveContainer(ctx context.Context, containerID str
 	}
 
 	c.logger.Info("成功删除Containerd容器", "container_id", containerID)
+	return nil
+}
+
+// RecordTimeoutContainer 记录超时容器
+func (c *ContainerdRuntime) RecordTimeoutContainer(containerID string) {
+	if c.detector != nil {
+		c.detector.RecordTimeoutContainer(containerID)
+	}
+}
+
+// HasTimeoutContainer 检查容器是否超时
+func (c *ContainerdRuntime) HasTimeoutContainer(containerID string) bool {
+	// ContainerdRuntime doesn't track timeouts directly, this is handled by the detector
+	return false
+}
+
+// KillContainerShim 杀死容器的shim进程
+func (c *ContainerdRuntime) KillContainerShim(containerID string) error {
+	c.logger.Info("尝试kill containerd-shim", "container_id", containerID)
+
+	// 查找containerd-shim进程
+	pattern := fmt.Sprintf("containerd-shim.*%s", containerID[:12])
+	cmd := exec.Command("pgrep", "-f", pattern)
+	output, err := cmd.Output()
+	if err != nil {
+		// 如果找不到进程，记录日志但不返回错误
+		c.logger.Debug("查找containerd-shim进程失败", "pattern", pattern, "error", err)
+		return nil
+	}
+
+	pids := strings.Fields(strings.TrimSpace(string(output)))
+	for _, pid := range pids {
+		killCmd := exec.Command("kill", "-9", pid)
+		if err := killCmd.Run(); err != nil {
+			c.logger.Warn("kill containerd-shim进程失败", "pid", pid, "error", err)
+		} else {
+			c.logger.Info("成功kill containerd-shim进程", "pid", pid)
+		}
+	}
+
 	return nil
 }
 

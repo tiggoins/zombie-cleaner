@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -14,20 +16,28 @@ import (
 
 // DockerRuntime Docker运行时实现
 type DockerRuntime struct {
-	client *client.Client
-	logger *logger.Logger
+	client   *client.Client
+	logger   *logger.Logger
+	timeout  time.Duration
+	detector interface {
+		RecordTimeoutContainer(containerID string)
+	}
 }
 
 // NewDockerRuntime 创建Docker运行时实例
-func NewDockerRuntime(log *logger.Logger) (*DockerRuntime, error) {
+func NewDockerRuntime(log *logger.Logger, timeout time.Duration, detector interface {
+	RecordTimeoutContainer(containerID string)
+}) (*DockerRuntime, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("1.38"))
 	if err != nil {
 		return nil, fmt.Errorf("无法连接Docker守护进程: %w", err)
 	}
 
 	return &DockerRuntime{
-		client: cli,
-		logger: log.WithComponent("docker-runtime"),
+		client:   cli,
+		logger:   log.WithComponent("docker-runtime"),
+		timeout:  timeout,
+		detector: detector,
 	}, nil
 }
 
@@ -41,12 +51,21 @@ func (d *DockerRuntime) ListContainers(ctx context.Context) ([]ContainerMeta, er
 	var result []ContainerMeta
 	for _, container := range containers {
 		// 为每个容器设置超时
-		inspectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		inspectCtx, cancel := context.WithTimeout(ctx, d.timeout)
 		inspect, err := d.client.ContainerInspect(inspectCtx, container.ID)
 		cancel()
 		
 		if err != nil {
-			d.logger.Warn("Docker容器检查失败", "container_id", container.ID, "error", err)
+			// 检查是否是超时错误
+			if errors.Is(err, context.DeadlineExceeded) {
+				d.logger.Warn("Docker容器检查超时", "container_id", container.ID)
+				// 记录超时容器
+				if d.detector != nil {
+					d.detector.RecordTimeoutContainer(container.ID)
+				}
+			} else {
+				d.logger.Warn("Docker容器检查失败", "container_id", container.ID, "error", err)
+			}
 			continue
 		}
 
@@ -118,6 +137,46 @@ func (d *DockerRuntime) RemoveContainer(ctx context.Context, containerID string,
 	return nil
 }
 
+// RecordTimeoutContainer 记录超时容器
+func (d *DockerRuntime) RecordTimeoutContainer(containerID string) {
+	if d.detector != nil {
+		d.detector.RecordTimeoutContainer(containerID)
+	}
+}
+
+// HasTimeoutContainer 检查容器是否超时
+func (d *DockerRuntime) HasTimeoutContainer(containerID string) bool {
+	// DockerRuntime doesn't track timeouts directly, this is handled by the detector
+	return false
+}
+
+// KillContainerShim 杀死容器的shim进程
+func (d *DockerRuntime) KillContainerShim(containerID string) error {
+	d.logger.Info("尝试kill docker-containerd-shim", "container_id", containerID)
+
+	// 查找docker-containerd-shim进程
+	pattern := fmt.Sprintf("docker-containerd-shim.*%s", containerID[:12])
+	cmd := exec.Command("pgrep", "-f", pattern)
+	output, err := cmd.Output()
+	if err != nil {
+		// 如果找不到进程，记录日志但不返回错误
+		d.logger.Debug("查找docker-containerd-shim进程失败", "pattern", pattern, "error", err)
+		return nil
+	}
+
+	pids := strings.Fields(strings.TrimSpace(string(output)))
+	for _, pid := range pids {
+		killCmd := exec.Command("kill", "-9", pid)
+		if err := killCmd.Run(); err != nil {
+			d.logger.Warn("kill docker-containerd-shim进程失败", "pid", pid, "error", err)
+		} else {
+			d.logger.Info("成功kill docker-containerd-shim进程", "pid", pid)
+		}
+	}
+
+	return nil
+}
+
 // Close 关闭Docker客户端连接
 func (d *DockerRuntime) Close() error {
 	if d.client != nil {
@@ -134,8 +193,8 @@ func (d *DockerRuntime) getContainerProcess(inspect types.ContainerJSON) string 
 	}
 	if args := inspect.Config.Cmd; len(args) > 0 {
 		argsStr := strings.Join(args, " ")
-		if len(argsStr) > 200 {
-			argsStr = argsStr[:200] + "..."
+		if len(argsStr) > 100 {
+			argsStr = argsStr[:100] + "..."
 		}
 		cmdParts = append(cmdParts, argsStr)
 	}

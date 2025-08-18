@@ -26,8 +26,15 @@ type ZombieInfo struct {
 
 type Detector struct {
 	logger           *logger.Logger
-	containerRuntime runtime.ContainerRuntimeInterface
+	ContainerRuntime runtime.ContainerRuntimeInterface
 	processTimeout   time.Duration
+	containerTimeout time.Duration
+
+	// 超时容器跟踪
+	timeoutContainers struct {
+		mu sync.Mutex
+		m  map[string]time.Time // containerID -> timeout time
+	}
 
 	// 全局缓存避免重复构建同一PID子树
 	pidTreeCache struct {
@@ -36,19 +43,27 @@ type Detector struct {
 	}
 }
 
-func New(processTimeout time.Duration, containerRuntime config.ContainerRuntime, log *logger.Logger) (*Detector, error) {
+func New(processTimeout time.Duration, containerTimeout time.Duration, containerRuntime config.ContainerRuntime, log *logger.Logger) (*Detector, error) {
+	d := &Detector{
+		logger:           log.WithComponent("detector"),
+		processTimeout:   processTimeout,
+		containerTimeout: containerTimeout,
+	}
+	d.pidTreeCache.m = make(map[int]map[int]bool)
+	d.timeoutContainers.m = make(map[string]time.Time)
+
 	var runtimeImpl runtime.ContainerRuntimeInterface
 	var err error
 
 	// 根据配置创建容器运行时实现
 	switch containerRuntime {
 	case config.RuntimeDocker:
-		runtimeImpl, err = runtime.NewDockerRuntime(log)
+		runtimeImpl, err = runtime.NewDockerRuntime(log, containerTimeout, d)
 		if err != nil {
 			log.Warn("无法创建Docker运行时", "error", err)
 		}
 	case config.RuntimeContainerd:
-		runtimeImpl, err = runtime.NewContainerdRuntime(log)
+		runtimeImpl, err = runtime.NewContainerdRuntime(log, containerTimeout, d)
 		if err != nil {
 			log.Warn("无法创建Containerd运行时", "error", err)
 		}
@@ -58,12 +73,7 @@ func New(processTimeout time.Duration, containerRuntime config.ContainerRuntime,
 		return nil, fmt.Errorf("%s", "无法创建容器运行时实现")
 	}
 
-	d := &Detector{
-		logger:           log.WithComponent("detector"),
-		containerRuntime: runtimeImpl,
-		processTimeout:   processTimeout,
-	}
-	d.pidTreeCache.m = make(map[int]map[int]bool)
+	d.ContainerRuntime = runtimeImpl
 
 	return d, nil
 }
@@ -76,6 +86,9 @@ func (d *Detector) DetectZombies(ctx context.Context) ([]ZombieInfo, error) {
 	}()
 
 	d.logger.Info("开始检测僵尸进程")
+	
+	// 清理旧的超时记录
+	d.CleanupOldTimeouts()
 
 	// 获取所有进程信息
 	fs, err := procfs.NewFS("/proc")
@@ -195,7 +208,7 @@ func (d *Detector) getContainerPIDTrees(ctx context.Context, parentMap map[int][
 	)
 
 	// 获取容器列表
-	containers, err := d.containerRuntime.ListContainers(ctx)
+	containers, err := d.ContainerRuntime.ListContainers(ctx)
 	if err != nil {
 		d.logger.Error("获取容器列表失败", "error", err)
 		return result, err
@@ -252,12 +265,12 @@ func (d *Detector) buildPIDTree(root int, parentMap map[int][]int) map[int]bool 
 		visited[pid] = true
 		tree[pid] = true
 		// 添加边界检查，防止无限递归
-		if pid < 0 || pid > 1000000 { // PID通常不会超过这个范围
+		if pid < 0 || pid > 4194304 { // kernel.pid_max = 4194304
 			return
 		}
 		for _, child := range parentMap[pid] {
 			// 添加子PID的边界检查
-			if child >= 0 && child <= 1000000 {
+			if child >= 0 && child <= 4194304 {
 				walk(child)
 			}
 		}
@@ -276,10 +289,47 @@ func (d *Detector) buildPIDTree(root int, parentMap map[int][]int) map[int]bool 
 	return tree
 }
 
+func (d *Detector) RecordTimeoutContainer(containerID string) {
+	d.timeoutContainers.mu.Lock()
+	defer d.timeoutContainers.mu.Unlock()
+	d.timeoutContainers.m[containerID] = time.Now()
+}
+
+func (d *Detector) HasTimeoutContainer(containerID string) bool {
+	d.timeoutContainers.mu.Lock()
+	defer d.timeoutContainers.mu.Unlock()
+	_, exists := d.timeoutContainers.m[containerID]
+	return exists
+}
+
+func (d *Detector) CleanupOldTimeouts() {
+	d.timeoutContainers.mu.Lock()
+	defer d.timeoutContainers.mu.Unlock()
+	
+	// 清理超过1小时的超时记录
+	threshold := time.Now().Add(-1 * time.Hour)
+	for containerID, timeoutTime := range d.timeoutContainers.m {
+		if timeoutTime.Before(threshold) {
+			delete(d.timeoutContainers.m, containerID)
+		}
+	}
+}
+
+func (d *Detector) GetTimeoutContainers() []string {
+	d.timeoutContainers.mu.Lock()
+	defer d.timeoutContainers.mu.Unlock()
+	
+	var containers []string
+	for containerID := range d.timeoutContainers.m {
+		containers = append(containers, containerID)
+	}
+	return containers
+}
+
 // Close 关闭容器运行时连接
 func (d *Detector) Close() error {
-	if d.containerRuntime != nil {
-		return d.containerRuntime.Close()
+	if d.ContainerRuntime != nil {
+		return d.ContainerRuntime.Close()
 	}
 	return nil
 }

@@ -24,6 +24,15 @@ type ContainerRuntimeInterface interface {
 	// RemoveContainer 删除容器
 	RemoveContainer(ctx context.Context, containerID string, timeout time.Duration) error
 	
+	// RecordTimeoutContainer 记录超时容器
+	RecordTimeoutContainer(containerID string)
+	
+	// HasTimeoutContainer 检查容器是否超时
+	HasTimeoutContainer(containerID string) bool
+	
+	// KillContainerShim 杀死容器的shim进程
+	KillContainerShim(containerID string) error
+	
 	// Close 关闭运行时客户端连接
 	Close() error
 }

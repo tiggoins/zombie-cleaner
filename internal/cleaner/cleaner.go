@@ -13,7 +13,6 @@ import (
 	"github.com/tiggoins/zombie-cleaner/internal/detector"
 	"github.com/tiggoins/zombie-cleaner/internal/logger"
 	"github.com/tiggoins/zombie-cleaner/internal/metrics"
-	"github.com/tiggoins/zombie-cleaner/internal/runtime"
 )
 
 // 容器状态跟踪
@@ -27,10 +26,9 @@ type ContainerState struct {
 }
 
 type Cleaner struct {
-	config          *config.Config
-	logger          *logger.Logger
-	detector        *detector.Detector
-	containerRuntime runtime.ContainerRuntimeInterface
+	config   *config.Config
+	logger   *logger.Logger
+	detector *detector.Detector
 
 	// 状态跟踪
 	containerStates map[string]*ContainerState
@@ -44,37 +42,17 @@ type Cleaner struct {
 }
 
 func New(cfg *config.Config, log *logger.Logger) (*Cleaner, error) {
-	det, err := detector.New(cfg.Cleaner.ProcessTimeout, cfg.Cleaner.ContainerRuntime, log)
+	det, err := detector.New(cfg.Cleaner.ProcessTimeout, cfg.Cleaner.ContainerTimeout, cfg.Cleaner.ContainerRuntime, log)
 	if err != nil {
 		return nil, fmt.Errorf("创建检测器失败: %w", err)
 	}
 
-	// 创建容器运行时实现
-	var containerRuntime runtime.ContainerRuntimeInterface
-	switch cfg.Cleaner.ContainerRuntime {
-	case config.RuntimeDocker:
-		containerRuntime, err = runtime.NewDockerRuntime(log)
-		if err != nil {
-			log.Warn("无法创建Docker运行时", "error", err)
-		}
-	case config.RuntimeContainerd:
-		containerRuntime, err = runtime.NewContainerdRuntime(log)
-		if err != nil {
-			log.Warn("无法创建Containerd运行时", "error", err)
-		}
-	}
-
-	if containerRuntime == nil {
-		return nil, fmt.Errorf("%s", "无法创建容器运行时实现")
-	}
-
 	c := &Cleaner{
-		config:           cfg,
-		logger:           log.WithComponent("cleaner"),
-		detector:         det,
-		containerRuntime: containerRuntime,
-		containerStates:  make(map[string]*ContainerState),
-		stopChan:         make(chan struct{}),
+		config:          cfg,
+		logger:          log.WithComponent("cleaner"),
+		detector:        det,
+		containerStates: make(map[string]*ContainerState),
+		stopChan:        make(chan struct{}),
 	}
 	for _, pattern := range cfg.Cleaner.WhitelistPatterns {
 		regex, err := regexp.Compile(pattern)
@@ -134,8 +112,8 @@ func (c *Cleaner) Stop(ctx context.Context) {
 	}
 
 	// 关闭容器运行时连接
-	if c.containerRuntime != nil {
-		if err := c.containerRuntime.Close(); err != nil {
+	if c.detector.ContainerRuntime != nil {
+		if err := c.detector.ContainerRuntime.Close(); err != nil {
 			c.logger.Warn("关闭容器运行时连接失败", "error", err)
 		}
 	}
@@ -157,6 +135,9 @@ func (c *Cleaner) runCheck(ctx context.Context) {
 		metrics.CleanupFailures.WithLabelValues(metrics.GetNodeName(), "detection_failed").Inc()
 		return
 	}
+
+	// 清理超时容器的shim进程
+	c.killTimeoutContainerShims()
 
 	if len(zombies) == 0 {
 		c.logger.Debug("未发现僵尸进程")
@@ -309,8 +290,8 @@ func (c *Cleaner) removeContainer(ctx context.Context, containerID string) error
 	c.logger.Info("尝试删除容器", "container_id", containerID)
 
 	// 使用容器运行时接口删除容器
-	if c.containerRuntime != nil {
-		if err := c.containerRuntime.RemoveContainer(timeoutCtx, containerID, c.config.Cleaner.ContainerTimeout); err != nil {
+	if c.detector.ContainerRuntime != nil {
+		if err := c.detector.ContainerRuntime.RemoveContainer(timeoutCtx, containerID, c.config.Cleaner.ContainerTimeout); err != nil {
 			if timeoutCtx.Err() == context.DeadlineExceeded {
 				metrics.ContainerOperationTimeouts.WithLabelValues(metrics.GetNodeName(), "remove").Inc()
 			}
@@ -392,6 +373,21 @@ func (c *Cleaner) cleanupOldStates() {
 		if !state.InProgress && now.Sub(state.LastDetected) > cleanupThreshold {
 			c.logger.Debug("清理过期的容器状态", "container_id", containerID)
 			delete(c.containerStates, containerID)
+		}
+	}
+}
+
+func (c *Cleaner) killTimeoutContainerShims() {
+	// 如果有detector，获取超时容器并清理它们的shim进程
+	if c.detector != nil && c.detector.ContainerRuntime != nil {
+		timeoutContainers := c.detector.GetTimeoutContainers()
+		for _, containerID := range timeoutContainers {
+			c.logger.Warn("发现超时容器，尝试清理shim进程", "container_id", containerID)
+			if err := c.detector.ContainerRuntime.KillContainerShim(containerID); err != nil {
+				c.logger.Error("清理shim进程失败", "container_id", containerID, "error", err)
+			} else {
+				c.logger.Info("成功清理shim进程", "container_id", containerID)
+			}
 		}
 	}
 }

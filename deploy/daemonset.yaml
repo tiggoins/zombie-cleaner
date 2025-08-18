@@ -155,10 +155,8 @@ data:
       max_concurrent_containers: 10
       whitelist_patterns:
         - "^kube-system-.*"
-        - "^monitoring-.*"
-        - "^logging-.*"
       dry_run: false
-      container_runtime: "auto"
+      container_runtime: "docker"
     metrics:
       enabled: true
       port: 9090
