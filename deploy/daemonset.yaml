@@ -1,0 +1,186 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zombie-cleaner
+  namespace: kube-system
+  labels:
+    app: zombie-cleaner
+spec:
+  selector:
+    matchLabels:
+      app: zombie-cleaner
+  template:
+    metadata:
+      labels:
+        app: zombie-cleaner
+    spec:
+      serviceAccountName: zombie-cleaner
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - operator: Exists
+        effect: NoExecute
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: zombie-cleaner
+        image: zombie-cleaner:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOG_LEVEL
+          value: "info"
+        - name: DRY_RUN
+          value: "false"
+        - name: CHECK_INTERVAL
+          value: "5m"
+        - name: CONFIRM_COUNT
+          value: "3"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/zombie-cleaner
+          readOnly: true
+        - name: proc
+          mountPath: /proc
+          readOnly: true
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+        - name: containerd-sock
+          mountPath: /var/run/containerd/containerd.sock
+        ports:
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: zombie-cleaner-config
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+      - name: containerd-sock
+        hostPath:
+          path: /var/run/containerd/containerd.sock
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zombie-cleaner
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zombie-cleaner
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
+- apiGroups: ["apps"]
+  resources: ["daemonsets"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zombie-cleaner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zombie-cleaner
+subjects:
+- kind: ServiceAccount
+  name: zombie-cleaner
+  namespace: kube-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zombie-cleaner-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    cleaner:
+      check_interval: 5m
+      confirm_count: 3
+      container_timeout: 30s
+      process_timeout: 10s
+      max_concurrent_containers: 10
+      whitelist_patterns:
+        - "^kube-system-.*"
+        - "^monitoring-.*"
+        - "^logging-.*"
+      dry_run: false
+      container_runtime: "auto"
+    metrics:
+      enabled: true
+      port: 9090
+      path: "/metrics"
+    logger:
+      level: "info"
+      format: "json"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zombie-cleaner-metrics
+  namespace: kube-system
+  labels:
+    app: zombie-cleaner
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: zombie-cleaner

@@ -1,0 +1,30 @@
+cleaner:
+  # 检测间隔 - 每5分钟检查一次
+  check_interval: 5m
+  # 确认次数 - 连续3次发现僵尸进程才执行清理
+  confirm_count: 3
+  # 容器操作超时时间
+  container_timeout: 10s
+  # 进程检查超时时间
+  process_timeout: 10s
+  # 最大并发处理容器数量
+  max_concurrent_containers: 10
+  # 白名单容器名称模式（正则表达式）
+  whitelist_patterns:
+    - "^kube-system-.*"
+    - "^monitoring-.*"
+    - "^logging-.*"
+  # 是否启用干跑模式（只检测不清理）
+  dry_run: false
+  # 容器运行时类型 ("docker", "containerd", "auto")
+  container_runtime: "auto"
+
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+
+logger:
+  level: "info"
+  format: "json"
+  # output_file: "/var/log/zombie-cleaner.log"

@@ -1,0 +1,74 @@
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: zombie-cleaner
+  namespace: kube-system
+  labels:
+    app: zombie-cleaner
+spec:
+  selector:
+    matchLabels:
+      app: zombie-cleaner
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# PrometheusRule for alerting
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: zombie-cleaner-alerts
+  namespace: kube-system
+  labels:
+    app: zombie-cleaner
+spec:
+  groups:
+  - name: zombie-cleaner
+    rules:
+    - alert: ZombieCleanerDown
+      expr: up{job="zombie-cleaner"} == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Zombie cleaner is down on {{ $labels.instance }}"
+        description: "Zombie cleaner has been down for more than 5 minutes on node {{ $labels.instance }}"
+
+    - alert: HighZombieProcessCount
+      expr: zombie_cleaner_zombie_processes_found > 10
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High zombie process count on {{ $labels.node }}"
+        description: "Node {{ $labels.node }} has {{ $value }} zombie processes for more than 10 minutes"
+
+    - alert: ZombieCleanerFrequentFailures
+      expr: increase(zombie_cleaner_cleanup_failures_total[1h]) > 5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Frequent cleanup failures on {{ $labels.node }}"
+        description: "Zombie cleaner has failed {{ $value }} times in the last hour on node {{ $labels.node }}"
+
+    - alert: ZombieCleanerHighLatency
+      expr: histogram_quantile(0.95, rate(zombie_cleaner_check_duration_seconds_bucket[5m])) > 30
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High zombie cleaner latency on {{ $labels.node }}"
+        description: "95th percentile of zombie cleaner check duration is {{ $value }}s on node {{ $labels.node }}"
+
+    - alert: ContainerOperationTimeouts
+      expr: increase(zombie_cleaner_container_operation_timeouts_total[1h]) > 3
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Frequent container operation timeouts on {{ $labels.node }}"
+        description: "{{ $value }} container operations have timed out in the last hour on node {{ $labels.node }}"
