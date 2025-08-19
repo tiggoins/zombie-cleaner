@@ -10,7 +10,7 @@ type Logger struct {
 	*slog.Logger
 }
 
-func New(level string) *Logger {
+func New(level string, format string) *Logger {
 	var logLevel slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
@@ -29,7 +29,14 @@ func New(level string) *Logger {
 		Level: logLevel,
 	}
 
-	handler := slog.NewJSONHandler(os.Stdout, opts)
+	var handler slog.Handler
+	switch strings.ToLower(format) {
+	case "text":
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	default:
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	}
+
 	logger := slog.New(handler)
 
 	return &Logger{Logger: logger}

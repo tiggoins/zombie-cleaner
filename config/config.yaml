@@ -5,8 +5,6 @@ cleaner:
   confirm_count: 3
   # 容器操作超时时间
   container_timeout: 10s
-  # 进程检查超时时间
-  process_timeout: 10s
   # 最大并发处理容器数量
   max_concurrent_containers: 10
   # 白名单容器名称模式（正则表达式）
@@ -16,13 +14,9 @@ cleaner:
   dry_run: false
   # 容器运行时类型 ("docker", "containerd",默认为"docker")
   container_runtime: "docker"
-
 metrics:
   enabled: true
   port: 9090
-  path: "/metrics"
-
 logger:
   level: "info"
   format: "json"
-  # output_file: "/var/log/zombie-cleaner.log"

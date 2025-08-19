@@ -3,9 +3,7 @@ package cleaner
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,12 +15,12 @@ import (
 
 // 容器状态跟踪
 type ContainerState struct {
-	ContainerID  string
-	ZombieCount  int
-	LastDetected time.Time
-	InProgress   bool
-	PodName      string
-	Namespace    string
+	ContainerID   string
+	DetectionCount int
+	LastDetected  time.Time
+	InProgress    bool
+	PodName       string
+	Namespace     string
 }
 
 type Cleaner struct {
@@ -42,7 +40,7 @@ type Cleaner struct {
 }
 
 func New(cfg *config.Config, log *logger.Logger) (*Cleaner, error) {
-	det, err := detector.New(cfg.Cleaner.ProcessTimeout, cfg.Cleaner.ContainerTimeout, cfg.Cleaner.ContainerRuntime, log)
+	det, err := detector.New(cfg.Cleaner.ContainerTimeout, cfg.Cleaner.ContainerRuntime, log)
 	if err != nil {
 		return nil, fmt.Errorf("创建检测器失败: %w", err)
 	}
@@ -54,6 +52,7 @@ func New(cfg *config.Config, log *logger.Logger) (*Cleaner, error) {
 		containerStates: make(map[string]*ContainerState),
 		stopChan:        make(chan struct{}),
 	}
+
 	for _, pattern := range cfg.Cleaner.WhitelistPatterns {
 		regex, err := regexp.Compile(pattern)
 		if err != nil {
@@ -197,18 +196,18 @@ func (c *Cleaner) processContainerZombies(ctx context.Context, containerZombies 
 		}
 
 		state.LastDetected = time.Now()
-		state.ZombieCount++
+		state.DetectionCount++
 
 		c.logger.Info("更新容器僵尸进程状态",
 			"container_id", containerID,
 			"pod_name", container.PodName,
 			"namespace", container.PodNS,
-			"zombie_count", state.ZombieCount,
+			"detection_count", state.DetectionCount,
 			"confirm_threshold", c.config.Cleaner.ConfirmCount,
 			"zombie_pids", c.getZombiePIDs(zombies))
 
 		// 检查是否达到确认次数
-		if state.ZombieCount >= c.config.Cleaner.ConfirmCount {
+		if state.DetectionCount >= c.config.Cleaner.ConfirmCount {
 			// 检查是否有PPID为1的僵尸进程
 			hasOrphanZombies := false
 			for _, zombie := range zombies {
@@ -219,7 +218,7 @@ func (c *Cleaner) processContainerZombies(ctx context.Context, containerZombies 
 						"pod_name", container.PodName,
 						"namespace", container.PodNS,
 						"zombie_pid", zombie.PID,
-						"zombie_count", state.ZombieCount)
+						"detection_count", state.DetectionCount)
 				}
 			}
 
@@ -229,15 +228,15 @@ func (c *Cleaner) processContainerZombies(ctx context.Context, containerZombies 
 					"container_id", containerID,
 					"pod_name", container.PodName,
 					"namespace", container.PodNS,
-					"zombie_count", state.ZombieCount)
+					"detection_count", state.DetectionCount)
 				// 重置计数器，避免重复报告
-				state.ZombieCount = 0
+				state.DetectionCount = 0
 			} else {
 				c.logger.Warn("容器僵尸进程确认次数达到阈值，开始清理",
 					"container_id", containerID,
 					"pod_name", container.PodName,
 					"namespace", container.PodNS,
-					"zombie_count", state.ZombieCount)
+					"detection_count", state.DetectionCount)
 
 				// 异步清理，避免阻塞其他容器的处理
 				go c.cleanupContainer(ctx, containerID, state, zombies)
@@ -271,8 +270,14 @@ func (c *Cleaner) cleanupContainer(ctx context.Context, containerID string, stat
 		containerLog.Error("删除容器失败，尝试强制清理", "error", err)
 
 		// 如果删除失败，尝试kill container-shim或containerd-shim
-		if err := c.killContainerShim(containerID); err != nil {
-			containerLog.Error("清理container-shim失败", "error", err)
+		if c.detector.ContainerRuntime != nil {
+			if err := c.detector.ContainerRuntime.KillContainerShim(containerID); err != nil {
+				containerLog.Error("清理container-shim失败", "error", err)
+				metrics.CleanupFailures.WithLabelValues(metrics.GetNodeName(), "cleanup_failed").Inc()
+				return
+			}
+		} else {
+			containerLog.Error("没有可用的容器运行时，无法清理shim进程")
 			metrics.CleanupFailures.WithLabelValues(metrics.GetNodeName(), "cleanup_failed").Inc()
 			return
 		}
@@ -302,47 +307,6 @@ func (c *Cleaner) removeContainer(ctx context.Context, containerID string) error
 	}
 
 	return fmt.Errorf("没有可用的容器运行时")
-}
-
-func (c *Cleaner) killContainerShim(containerID string) error {
-	c.logger.Info("尝试kill container-shim", "container_id", containerID)
-
-	// 查找containerd-shim和container-shim进程
-	// containerd使用containerd-shim，而Docker可能使用docker-containerd-shim
-	patterns := []string{
-		fmt.Sprintf("containerd-shim.*%s", containerID[:12]),
-		fmt.Sprintf("docker-containerd-shim.*%s", containerID[:12]),
-	}
-
-	var allPids []string
-	for _, pattern := range patterns {
-		cmd := exec.Command("pgrep", "-f", pattern)
-		output, err := cmd.Output()
-		if err != nil {
-			// 如果找不到进程，继续查找其他模式
-			c.logger.Debug("查找shim进程模式失败", "pattern", pattern, "error", err)
-			continue
-		}
-
-		pids := strings.Fields(strings.TrimSpace(string(output)))
-		allPids = append(allPids, pids...)
-	}
-
-	if len(allPids) == 0 {
-		return fmt.Errorf("未找到docker-containerd-shim或containerd-shim进程")
-	}
-
-	// Kill所有相关的shim进程
-	for _, pid := range allPids {
-		killCmd := exec.Command("kill", "-9", pid)
-		if err := killCmd.Run(); err != nil {
-			c.logger.Warn("kill shim进程失败", "pid", pid, "error", err)
-		} else {
-			c.logger.Info("成功kill shim进程", "pid", pid)
-		}
-	}
-
-	return nil
 }
 
 func (c *Cleaner) isWhitelisted(podName string) bool {
@@ -382,7 +346,7 @@ func (c *Cleaner) killTimeoutContainerShims() {
 	if c.detector != nil && c.detector.ContainerRuntime != nil {
 		timeoutContainers := c.detector.GetTimeoutContainers()
 		for _, containerID := range timeoutContainers {
-			c.logger.Warn("发现超时容器，尝试清理shim进程", "container_id", containerID)
+			c.logger.Warn("发现inspect超时容器，尝试清理shim进程", "container_id", containerID)
 			if err := c.detector.ContainerRuntime.KillContainerShim(containerID); err != nil {
 				c.logger.Error("清理shim进程失败", "container_id", containerID, "error", err)
 			} else {

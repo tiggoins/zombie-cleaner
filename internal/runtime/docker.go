@@ -144,12 +144,6 @@ func (d *DockerRuntime) RecordTimeoutContainer(containerID string) {
 	}
 }
 
-// HasTimeoutContainer 检查容器是否超时
-func (d *DockerRuntime) HasTimeoutContainer(containerID string) bool {
-	// DockerRuntime doesn't track timeouts directly, this is handled by the detector
-	return false
-}
-
 // KillContainerShim 杀死容器的shim进程
 func (d *DockerRuntime) KillContainerShim(containerID string) error {
 	d.logger.Info("尝试kill docker-containerd-shim", "container_id", containerID)

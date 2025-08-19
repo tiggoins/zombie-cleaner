@@ -27,7 +27,6 @@ type ZombieInfo struct {
 type Detector struct {
 	logger           *logger.Logger
 	ContainerRuntime runtime.ContainerRuntimeInterface
-	processTimeout   time.Duration
 	containerTimeout time.Duration
 
 	// 超时容器跟踪
@@ -43,10 +42,9 @@ type Detector struct {
 	}
 }
 
-func New(processTimeout time.Duration, containerTimeout time.Duration, containerRuntime config.ContainerRuntime, log *logger.Logger) (*Detector, error) {
+func New(containerTimeout time.Duration, containerRuntime config.ContainerRuntime, log *logger.Logger) (*Detector, error) {
 	d := &Detector{
 		logger:           log.WithComponent("detector"),
-		processTimeout:   processTimeout,
 		containerTimeout: containerTimeout,
 	}
 	d.pidTreeCache.m = make(map[int]map[int]bool)

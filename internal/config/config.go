@@ -1,18 +1,11 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-type Config struct {
-	Cleaner CleanerConfig `yaml:"cleaner"`
-	Metrics MetricsConfig `yaml:"metrics"`
-	Logger  LoggerConfig  `yaml:"logger"`
-}
 
 type ContainerRuntime string
 
@@ -21,6 +14,22 @@ const (
 	RuntimeContainerd ContainerRuntime = "containerd"
 )
 
+type Config struct {
+	Cleaner CleanerConfig `yaml:"cleaner"`
+	Metrics MetricsConfig `yaml:"metrics"`
+	Logger  LoggerConfig  `yaml:"logger"`
+}
+
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Port    int  `yaml:"port"`
+}
+
+type LoggerConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
 type CleanerConfig struct {
 	// 检测间隔
 	CheckInterval time.Duration `yaml:"check_interval"`
@@ -28,8 +37,6 @@ type CleanerConfig struct {
 	ConfirmCount int `yaml:"confirm_count"`
 	// 容器操作超时时间
 	ContainerTimeout time.Duration `yaml:"container_timeout"`
-	// 进程检查超时时间
-	ProcessTimeout time.Duration `yaml:"process_timeout"`
 	// 最大并发处理容器数量
 	MaxConcurrentContainers int `yaml:"max_concurrent_containers"`
 	// 白名单容器名称模式
@@ -40,25 +47,12 @@ type CleanerConfig struct {
 	ContainerRuntime ContainerRuntime `yaml:"container_runtime"`
 }
 
-type MetricsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Port    int    `yaml:"port"`
-	Path    string `yaml:"path"`
-}
-
-type LoggerConfig struct {
-	Level      string `yaml:"level"`
-	Format     string `yaml:"format"`
-	OutputFile string `yaml:"output_file"`
-}
-
-func Load(configFile string) (*Config, error) {
+func Load(configFile string) *Config {
 	cfg := &Config{
 		Cleaner: CleanerConfig{
 			CheckInterval:           5 * time.Minute,
 			ConfirmCount:            3,
-			ContainerTimeout:        30 * time.Second,
-			ProcessTimeout:          10 * time.Second,
+			ContainerTimeout:        10 * time.Second,
 			MaxConcurrentContainers: 10,
 			WhitelistPatterns:       []string{},
 			DryRun:                  false,
@@ -67,7 +61,6 @@ func Load(configFile string) (*Config, error) {
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Port:    9090,
-			Path:    "/metrics",
 		},
 		Logger: LoggerConfig{
 			Level:  "info",
@@ -79,32 +72,32 @@ func Load(configFile string) (*Config, error) {
 	if _, err := os.Stat(configFile); err == nil {
 		data, err := os.ReadFile(configFile)
 		if err != nil {
-			return nil, fmt.Errorf("读取配置文件失败: %w", err)
+			panic("读取配置文件失败")
 		}
 
 		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("解析配置文件失败: %w", err)
+			panic("解析配置文件失败")
 		}
 	}
 
-	return cfg, cfg.validate()
+	cfg.validate()
+	return cfg
 }
 
-func (c *Config) validate() error {
+func (c *Config) validate() {
 	if c.Cleaner.CheckInterval <= 0 {
-		return fmt.Errorf("检测间隔必须大于0")
+		panic("检测间隔必须大于0")
 	}
 	if c.Cleaner.ConfirmCount <= 0 {
-		return fmt.Errorf("确认次数必须大于0")
+		panic("确认次数必须大于0")
 	}
 	if c.Cleaner.ContainerTimeout <= 0 {
-		return fmt.Errorf("容器超时时间必须大于0")
+		panic("容器超时时间必须大于0")
 	}
 	if c.Cleaner.MaxConcurrentContainers <= 0 {
 		c.Cleaner.MaxConcurrentContainers = 10
 	}
 	if c.Cleaner.ContainerRuntime != RuntimeContainerd && c.Cleaner.ContainerRuntime != RuntimeDocker {
-		return fmt.Errorf("容器运行时必须是'docker'或'containerd'")
+		panic("容器运行时必须是docker或containerd")
 	}
-	return nil
 }

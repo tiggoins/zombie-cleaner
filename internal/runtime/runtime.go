@@ -27,9 +27,6 @@ type ContainerRuntimeInterface interface {
 	// RecordTimeoutContainer 记录超时容器
 	RecordTimeoutContainer(containerID string)
 	
-	// HasTimeoutContainer 检查容器是否超时
-	HasTimeoutContainer(containerID string) bool
-	
 	// KillContainerShim 杀死容器的shim进程
 	KillContainerShim(containerID string) error
 	

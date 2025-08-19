@@ -168,12 +168,6 @@ func (c *ContainerdRuntime) RecordTimeoutContainer(containerID string) {
 	}
 }
 
-// HasTimeoutContainer 检查容器是否超时
-func (c *ContainerdRuntime) HasTimeoutContainer(containerID string) bool {
-	// ContainerdRuntime doesn't track timeouts directly, this is handled by the detector
-	return false
-}
-
 // KillContainerShim 杀死容器的shim进程
 func (c *ContainerdRuntime) KillContainerShim(containerID string) error {
 	c.logger.Info("尝试kill containerd-shim", "container_id", containerID)

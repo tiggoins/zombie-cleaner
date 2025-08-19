@@ -16,30 +16,27 @@ import (
 
 var (
 	configFile = flag.String("config", "/etc/zombie-cleaner/config.yaml", "配置文件路径")
-	logLevel   = flag.String("log-level", "info", "日志级别")
 )
 
 func main() {
 	flag.Parse()
 
+	// 加载配置
+	cfg := config.Load(*configFile)
 	// 初始化日志
-	log := logger.New(*logLevel)
+	log := logger.New(cfg.Logger.Level, cfg.Logger.Format)
 	log.Info("启动僵尸进程清理器")
 
-	// 加载配置
-	cfg, err := config.Load(*configFile)
-	if err != nil {
-		log.Fatal("加载配置失败", "error", err)
-	}
-	log.Info("配置加载成功", "config", cfg)
-
 	// 初始化指标监控
-	metricsServer := metrics.NewServer(cfg.Metrics.Port, log)
-	go func() {
-		if err := metricsServer.Start(); err != nil {
-			log.Error("指标服务器启动失败", "error", err)
-		}
-	}()
+	if cfg.Metrics.Enabled {
+		metricsServer := metrics.NewServer(cfg.Metrics.Port, log)
+		go func() {
+			if err := metricsServer.Start(); err != nil {
+				log.Error("指标服务器启动失败", "error", err)
+			}
+		}()
+		log.Info("指标监控已启用", "port", cfg.Metrics.Port)
+	}
 
 	// 创建清理器
 	ctx, cancel := context.WithCancel(context.Background())

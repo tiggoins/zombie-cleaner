@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"os"
-	
+
 	"github.com/tiggoins/zombie-cleaner/internal/logger"
 )
 
@@ -94,7 +94,10 @@ func NewServer(port int, log *logger.Logger) *Server {
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/health", s.healthCheck)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.port),
@@ -103,13 +106,7 @@ func (s *Server) Start() error {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	s.logger.Info("启动指标服务器", "port", s.port)
 	return server.ListenAndServe()
-}
-
-func (s *Server) healthCheck(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
 }
 
 func GetNodeName() string {
