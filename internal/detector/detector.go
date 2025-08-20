@@ -58,17 +58,13 @@ func New(containerTimeout time.Duration, containerRuntime config.ContainerRuntim
 	case config.RuntimeDocker:
 		runtimeImpl, err = runtime.NewDockerRuntime(log, containerTimeout, d)
 		if err != nil {
-			log.Warn("无法创建Docker运行时", "error", err)
+			return nil, fmt.Errorf("%s", "无法创建Docker运行时")
 		}
 	case config.RuntimeContainerd:
 		runtimeImpl, err = runtime.NewContainerdRuntime(log, containerTimeout, d)
 		if err != nil {
-			log.Warn("无法创建Containerd运行时", "error", err)
+			return nil, fmt.Errorf("%s", "无法创建Containerd运行时")
 		}
-	}
-
-	if runtimeImpl == nil {
-		return nil, fmt.Errorf("%s", "无法创建容器运行时实现")
 	}
 
 	d.ContainerRuntime = runtimeImpl
